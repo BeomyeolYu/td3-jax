@@ -5,13 +5,10 @@ from jax import random as jrandom
 from flax import linen as nn
 from flax import optim
 from flax import serialization
-
 import utils
-
 
 # Implementation of Twin Delayed Deep Deterministic Policy Gradients (TD3)
 # Paper: https://arxiv.org/abs/1802.09477
-
 
 class Actor(nn.Module):
 
