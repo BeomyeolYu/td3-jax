@@ -5,7 +5,7 @@ import os
 
 import utils
 import TD3
-
+# import TD3_optim
 
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
@@ -94,6 +94,7 @@ if __name__ == "__main__":
     kwargs["noise_clip"] = args.noise_clip * max_action
     kwargs["policy_freq"] = args.policy_freq
     policy = TD3.TD3(**kwargs)
+    # policy = TD3_optim.TD3(**kwargs)
 
     if args.load_model:
         policy_file = file_name 
