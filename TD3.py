@@ -1,5 +1,7 @@
 """
 pip install jax==0.4.13 jaxlib==0.4.13 flax==0.7.0
+https://github.com/charraut/rl-basics/blob/master/src/td3/flax_td3_continuous.py
+https://github.com/perrin-isir/xpag/blob/main/xpag/agents/td3/td3.py
 """
 
 import numpy as np
@@ -24,7 +26,7 @@ class Actor(nn.Module):
         self.l2 = nn.Dense(256)
         self.l3 = nn.Dense(self.action_dim)
 
-    #@linen.compact
+    @nn.compact
     def __call__(self, state):
         a = nn.relu(self.l1(state))
         a = nn.relu(self.l2(a))
@@ -45,7 +47,7 @@ class Critic(nn.Module):
         self.l5 = nn.Dense(256)
         self.l6 = nn.Dense(1)
 
-    #@linen.compact
+    @nn.compact
     def __call__(self, state, action):
         sa = jnp.concatenate([state, action], axis=-1)
 
@@ -71,36 +73,34 @@ class Critic(nn.Module):
 class TD3:
 
     def __init__(self, state_dim, action_dim, max_action, discount=0.99, tau=0.005,
-                policy_noise=0.2, noise_clip=0.5, policy_freq=2, seed=0, jit=False,
-    ):  
+                policy_noise=0.2, noise_clip=0.5, policy_freq=2, seed=0, jit=False):  
 
         self.rngs = utils.PRNGKeys(seed)
 
-        # initialize models
-        # Generate (random) ground truth W and b
-        # Note: we could get W, b from a randomely initialized nn.Dense here
+        # Initialize models by generating (random) dummy params:
         init_state  = jnp.zeros([1, state_dim],  dtype=jnp.float32)
         init_action = jnp.zeros([1, action_dim], dtype=jnp.float32)
         #key, actor_key, critic_key = jax.random.split(jax.random.PRNGKey(args.seed), 3)
 
         # Create the actor networks and the optimizer:
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=1.0,
+            warmup_steps=50,
+            decay_steps=1_000,
+            end_value=0,
+        )
+        schedule=3e-4
         actor_rng_key = self.rngs.get_key()
         self.actor = Actor(action_dim, max_action)
         self.actor_params = self.actor.init(actor_rng_key, init_state)
         self.actor_target_params = self.actor.init(actor_rng_key, init_state)
-        """
+        '''
         self.actor_optimizer = optax.adamw(learning_rate=3e-4)
-        """
-        schedule = optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=1.0,
-        warmup_steps=50,
-        decay_steps=1_000,
-        end_value=3e-4,
-        )
+        '''
         self.actor_optimizer = optax.chain(
-        optax.clip(1.0),
-        optax.adamw(learning_rate=schedule),
+            optax.clip(1.0),
+            optax.lion(learning_rate=schedule),
         )
         self.actor_optimizer_state = self.actor_optimizer.init(self.actor_params)
 
@@ -109,12 +109,12 @@ class TD3:
         self.critic = Critic()
         self.critic_params = self.critic.init(critic_rng_key, init_state, init_action)
         self.critic_target_params = self.critic.init(critic_rng_key, init_state, init_action) 
-        """
+        '''
         self.critic_optimizer = optax.adamw(learning_rate=3e-4)
-        """
+        '''
         self.critic_optimizer = optax.chain(
-        optax.clip(1.0),
-        optax.adamw(learning_rate=schedule),
+            optax.clip(1.0),
+            optax.lion(learning_rate=schedule),
         )
         self.critic_optimizer_state = self.critic_optimizer.init(self.critic_params)
 
@@ -133,16 +133,13 @@ class TD3:
 
         self.total_it = 0
 
-
     def actor_jit(self, actor_params, state):
         return self.actor.apply(actor_params, state)
-
 
     def select_action(self, state):
         state = jax.device_put(state[None])
         return np.array(self.actor_jit(self.actor_params, state)).flatten()
     
-
     def get_actor_loss(self, actor_params, critic_params, state):
         # Set actor loss s.t. Q(s,\mu(s)) approximates \max_a Q(s,a):
         action = self.actor.apply(actor_params, state)
@@ -150,14 +147,8 @@ class TD3:
         actor_loss = -jnp.mean(Q_value)
         return actor_loss
     
-
-    def get_critic_loss(self, 
-                        critic_params, 
-                        critic_target_params, 
-                        actor_target_params,
-                        transition, 
-                        rng):
-        
+    def get_critic_loss(self, critic_params, critic_target_params, 
+                        actor_target_params, transition, rng):
         # Randomly sample a batch of transitions from an experience replay buffer:
         state, action, next_state, reward, not_done = transition
 
@@ -188,14 +179,8 @@ class TD3:
 
         return critic_loss
 
-    def critic_update_step(self,
-                           critic_params, 
-                           critic_target_params, 
-                           actor_target_params, 
-                           critic_optimizer_state,
-                           transition, 
-                           rng):
-
+    def critic_update_step(self, critic_params, critic_target_params, actor_target_params, 
+                           critic_optimizer_state, transition, rng):
         critic_value_and_grad = jax.value_and_grad(self.get_critic_loss)
         critic_loss, critic_grad = critic_value_and_grad(
             critic_params,
@@ -257,7 +242,6 @@ class TD3:
 
         # Delayed policy updates
         if self.total_it % self.policy_freq == 0:
-
             # Actor step:
             self.actor_params, self.actor_optimizer_state, _ = self.actor_update_step(
                 self.actor_params,
@@ -280,7 +264,6 @@ class TD3:
             f.write(serialization.to_bytes(self.actor_params))
 
     def load(self, filename):
-        # TODO: model loading is untested
         critic_file = filename + '_critic.ckpt'
         with open(critic_file, 'rb') as f:
             self.critic_params = serialization.from_bytes(self.critic_params, f.read())
@@ -289,4 +272,3 @@ class TD3:
         with open(actor_file, 'rb') as f:
             self.actor_params = serialization.from_bytes(self.actor_params, f.read())
         self.actor_target_params = self.actor_params
-        
