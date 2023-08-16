@@ -8,7 +8,6 @@ import numpy as np
 import jax # NN lib built on top of JAX developed by Google Research
 from jax import numpy as jnp
 from jax import random as jrandom
-import flax
 from flax import linen as nn
 from flax import serialization
 import optax # JAX optimizers - a separate lib developed by DeepMind
@@ -17,53 +16,25 @@ import utils
 # Implementation of Twin Delayed Deep Deterministic Policy Gradients (TD3)
 # Paper: https://arxiv.org/abs/1802.09477
 
-class ApproxSpectralNorm:
-    @staticmethod
-    def forward(ctx, W):
-        n = W.shape[1]
-        x = jax.random.normal(jax.random.PRNGKey(0), (n,))
-
-        for _ in range(10):
-            x = W.T @ W @ x
-            x = x / jnp.linalg.norm(x)
-
-        v1 = x
-        sigma1 = jnp.linalg.norm(W@v1)
-        u1 = (W@v1)/sigma1
-
-        return sigma1
-
-class Actor(nn.Module): # Create a Flax Module dataclass
+class Actor(nn.Module):
 
     action_dim: int
     max_action: float
-    approx_spectral_norm = ApproxSpectralNorm.forward
 
     def setup(self):
         self.l1 = nn.Dense(256)
         self.l2 = nn.Dense(256)
         self.l3 = nn.Dense(self.action_dim)
 
+    @nn.compact
     def __call__(self, state):
         a = nn.relu(self.l1(state))
         a = nn.relu(self.l2(a))
         action = self.max_action * nn.tanh(self.l3(a))
         return action
-    
-    def spectral_norm(self):
-        reg_spectral = 0.0
-        serialised_params = flax.serialization.to_state_dict(self.l1.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-        serialised_params = flax.serialization.to_state_dict(self.l2.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-        serialised_params = flax.serialization.to_state_dict(self.l3.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-        return reg_spectral
 
 
-class Critic(nn.Module): # create a Flax Module dataclass
-
-    approx_spectral_norm = ApproxSpectralNorm.forward
+class Critic(nn.Module):
 
     def setup(self):
         # Q1 architecture
@@ -76,6 +47,7 @@ class Critic(nn.Module): # create a Flax Module dataclass
         self.l5 = nn.Dense(256)
         self.l6 = nn.Dense(1)
 
+    @nn.compact
     def __call__(self, state, action):
         sa = jnp.concatenate([state, action], axis=-1)
 
@@ -96,23 +68,6 @@ class Critic(nn.Module): # create a Flax Module dataclass
         q1 = nn.relu(self.l2(q1))
         q1 = self.l3(q1)
         return q1
-    
-    def spectral_norm(self):
-        reg_spectral = 0.0
-        serialised_params = flax.serialization.to_state_dict(self.l1.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-        serialised_params = flax.serialization.to_state_dict(self.l2.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-        serialised_params = flax.serialization.to_state_dict(self.l3.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-
-        serialised_params = flax.serialization.to_state_dict(self.l4.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-        serialised_params = flax.serialization.to_state_dict(self.l5.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-        serialised_params = flax.serialization.to_state_dict(self.l6.variables.pop('params')[1])
-        reg_spectral += self.approx_spectral_norm(serialised_params['kernel'])**2
-        return reg_spectral
 
 
 class TD3:
@@ -135,19 +90,18 @@ class TD3:
             decay_steps=1_000,
             end_value=0,
         )
-        schedule=1e-5
+        schedule=3e-4
         actor_rng_key = self.rngs.get_key()
         self.actor = Actor(action_dim, max_action)
         self.actor_params = self.actor.init(actor_rng_key, init_state)
         self.actor_target_params = self.actor.init(actor_rng_key, init_state)
         '''
-        self.actor_optimizer = optax.adamw(learning_rate=3e-4, weight_decay=0.01)
+        self.actor_optimizer = optax.adamw(learning_rate=3e-4)
         '''
         self.actor_optimizer = optax.chain(
             optax.clip(1.0),
-            optax.fromage(learning_rate=schedule),
+            optax.lion(learning_rate=schedule),
         )
-        # Initialize the optimizer state using the init function and params of the model:
         self.actor_optimizer_state = self.actor_optimizer.init(self.actor_params)
 
         # Create the critic networks and the optimizer:
@@ -156,17 +110,16 @@ class TD3:
         self.critic_params = self.critic.init(critic_rng_key, init_state, init_action)
         self.critic_target_params = self.critic.init(critic_rng_key, init_state, init_action) 
         '''
-        self.critic_optimizer = optax.adamw(learning_rate=3e-4, weight_decay=0.01)
+        self.critic_optimizer = optax.adamw(learning_rate=3e-4)
         '''
         self.critic_optimizer = optax.chain(
             optax.clip(1.0),
-            optax.fromage(learning_rate=schedule),
+            optax.lion(learning_rate=schedule),
         )
-        # Initialize the optimizer state using the init function and params of the model:
         self.critic_optimizer_state = self.critic_optimizer.init(self.critic_params)
 
         # Jit
-        self.actor_apply = jax.jit(self.actor_apply)
+        self.actor_jit = jax.jit(self.actor_jit)
         self.actor_update_step = jax.jit(self.actor_update_step)
         self.critic_update_step = jax.jit(self.critic_update_step)
         self.update_target_params = jax.jit(self.update_target_params)
@@ -180,42 +133,18 @@ class TD3:
 
         self.total_it = 0
 
-    def actor_apply(self, actor_params, state):
+    def actor_jit(self, actor_params, state):
         return self.actor.apply(actor_params, state)
 
     def select_action(self, state):
         state = jax.device_put(state[None])
-        return np.array(self.actor_apply(self.actor_params, state)).flatten()
+        return np.array(self.actor_jit(self.actor_params, state)).flatten()
     
-    def get_actor_loss(self, actor_params, critic_params, state, next_state):
+    def get_actor_loss(self, actor_params, critic_params, state):
         # Set actor loss s.t. Q(s,\mu(s)) approximates \max_a Q(s,a):
-        current_action = self.actor.apply(actor_params, state)
-        Q_value = self.critic.apply(critic_params, state, current_action, method=self.critic.Q1)
+        action = self.actor.apply(actor_params, state)
+        Q_value = self.critic.apply(critic_params, state, action, method=self.critic.Q1)
         actor_loss = -jnp.mean(Q_value)
-        ####################################### 1e-3
-        actor_loss += (1e-4*self.actor.apply(self.actor_params, method=self.actor.spectral_norm))
-        #######################################
-
-        """
-        Regularizing Action Policies for Smooth Control
-        """        
-        # Temporal Smoothness:
-        lam_T = 0.2 # 0.5 - 0.8 
-        next_action = jnp.clip(self.actor.apply(actor_params, next_state), 
-                               -self.max_action, self.max_action)
-        Loss_T = optax.squared_error(current_action, next_action).mean()
-        actor_loss += lam_T * Loss_T
-
-        # Spatial Smoothness:
-        lam_S = 0.3 # 0.3 - 0.5 
-        mu, sigma = 0., 0.05 # mean and standard deviation
-        noise_S = jnp.clip(mu+sigma*jrandom.normal(jax.random.PRNGKey(0),(state.shape[0], 1)),
-                           -self.noise_clip, self.noise_clip)
-        action_bar = jnp.clip((current_action + noise_S), 
-                              -self.max_action, self.max_action)
-        Loss_S = optax.squared_error(current_action, action_bar).mean()
-        actor_loss += lam_S * Loss_S
-
         return actor_loss
     
     def get_critic_loss(self, critic_params, critic_target_params, 
@@ -247,20 +176,11 @@ class TD3:
         Q1_loss = jnp.mean(jnp.square(current_Q1 - target_Q))
         Q2_loss = jnp.mean(jnp.square(current_Q2 - target_Q))
         critic_loss = Q1_loss + Q2_loss
-        ####################################### 5e-4
-        critic_loss += (1e-5*self.critic.apply(self.critic_params, method=self.critic.spectral_norm))
-        #######################################
 
         return critic_loss
 
-    def critic_update_step(self, 
-                           critic_params, 
-                           critic_target_params, 
-                           actor_target_params, 
-                           critic_optimizer_state, 
-                           transition, 
-                           rng):
-        # We need a loss function that can be differentiated by Jax to obtain the gradients:
+    def critic_update_step(self, critic_params, critic_target_params, actor_target_params, 
+                           critic_optimizer_state, transition, rng):
         critic_value_and_grad = jax.value_and_grad(self.get_critic_loss)
         critic_loss, critic_grad = critic_value_and_grad(
             critic_params,
@@ -281,15 +201,13 @@ class TD3:
                           actor_params, 
                           critic_params, 
                           actor_optimizer_state,
-                          state,
-                          next_state):
-        # We need a loss function that can be differentiated by Jax to obtain the gradients:
+                          state):
+
         actor_value_and_grad = jax.value_and_grad(self.get_actor_loss)
         actor_loss, actor_grad = actor_value_and_grad(
             actor_params, 
             critic_params, 
-            state,
-            next_state
+            state
         )
         actor_params_update, actor_optimizer_state = self.actor_optimizer.update(
             actor_grad, actor_optimizer_state, actor_params
@@ -329,8 +247,7 @@ class TD3:
                 self.actor_params,
                 self.critic_params,
                 self.actor_optimizer_state,
-                state,
-                next_state)
+                state)
 
             # Update the frozen target models
             params = (self.actor_params, self.critic_params)

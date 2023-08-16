@@ -9,10 +9,8 @@ import TD3
 
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
-
 def type_bool(x):
     return x.lower() != 'false'
-
 
 # Runs policy for X episodes and returns average reward
 # A fixed seed is used for the eval environment
@@ -24,7 +22,7 @@ def eval_policy(policy, env_name, seed, eval_episodes=10):
     for _ in range(eval_episodes):
         state, done = eval_env.reset(), False
         while not done:
-            action = policy.select_action(np.array(state))
+            action = (policy.select_action(np.array(state))).clip(-max_action, max_action)
             state, reward, done, _ = eval_env.step(action)
             avg_reward += reward
 
@@ -40,7 +38,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", default="TD3")                  # Policy name (TD3, DDPG or OurDDPG)
-    parser.add_argument("--env", default="Pendulum-v1")          # OpenAI gym environment name
+    parser.add_argument("--env", default="LunarLanderContinuous-v2")          # OpenAI gym environment name # Pendulum-v0
     parser.add_argument("--seed", default=0, type=int)              # Sets Gym, PyTorch and Numpy seeds
     parser.add_argument("--start_timesteps", default=1e4, type=int)# Time steps initial random policy is used
     parser.add_argument("--eval_freq", default=5e3, type=int)       # How often (time steps) we evaluate
