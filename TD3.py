@@ -40,8 +40,8 @@ class Actor(nn.Module): # Create a Flax Module dataclass
     approx_spectral_norm = ApproxSpectralNorm.forward
 
     def setup(self):
-        self.l1 = nn.Dense(256)
-        self.l2 = nn.Dense(256)
+        self.l1 = nn.Dense(16)
+        self.l2 = nn.Dense(16)
         self.l3 = nn.Dense(self.action_dim)
 
     def __call__(self, state):
@@ -67,13 +67,13 @@ class Critic(nn.Module): # create a Flax Module dataclass
 
     def setup(self):
         # Q1 architecture
-        self.l1 = nn.Dense(256)
-        self.l2 = nn.Dense(256)
+        self.l1 = nn.Dense(512)
+        self.l2 = nn.Dense(512)
         self.l3 = nn.Dense(1)
 
         # Q2 architecture
-        self.l4 = nn.Dense(256)
-        self.l5 = nn.Dense(256)
+        self.l4 = nn.Dense(512)
+        self.l5 = nn.Dense(512)
         self.l6 = nn.Dense(1)
 
     def __call__(self, state, action):
@@ -117,8 +117,8 @@ class Critic(nn.Module): # create a Flax Module dataclass
 
 class TD3:
 
-    def __init__(self, state_dim, action_dim, max_action, discount=0.99, tau=0.005,
-                policy_noise=0.2, noise_clip=0.5, policy_freq=2, seed=0, jit=False):  
+    def __init__(self, state_dim, action_dim, max_action, discount, tau,
+                policy_noise, noise_clip, policy_freq, seed, jit):  
 
         self.rngs = utils.PRNGKeys(seed)
 
@@ -135,18 +135,40 @@ class TD3:
             decay_steps=1_000,
             end_value=0,
         )
-        schedule=1e-5
+        schedule=3e-4
         actor_rng_key = self.rngs.get_key()
         self.actor = Actor(action_dim, max_action)
         self.actor_params = self.actor.init(actor_rng_key, init_state)
         self.actor_target_params = self.actor.init(actor_rng_key, init_state)
-        '''
-        self.actor_optimizer = optax.adamw(learning_rate=3e-4, weight_decay=0.01)
-        '''
+
+        # self.actor_optimizer = optax.adamw(learning_rate=3e-4, weight_decay=0.01)
+        
+        # self.actor_optimizer = optax.chain(
+        #     optax.clip(1.0),
+        #     optax.adamw(learning_rate=schedule),
+        # )
+        ###################################################################
+        # Exponential decay of the learning rate.
+        start_learning_rate = 1e-3
+        end_learning_rate = 1e-5
+        scheduler = optax.exponential_decay(
+            init_value=start_learning_rate, 
+            transition_steps=1000,
+            decay_rate=0.99,
+            end_value=end_learning_rate
+            )
+        
+        # Combining gradient transforms using `optax.chain`.
         self.actor_optimizer = optax.chain(
-            optax.clip(1.0),
-            optax.fromage(learning_rate=schedule),
-        )
+            optax.clip_by_global_norm(1000.0),  # Clip by the gradient by the global norm.
+            # optax.scale_by_lion(),  # Use the updates from lion.
+            optax.scale_by_belief(),
+            optax.scale_by_schedule(scheduler),  # Use the learning rate from the scheduler.
+            # optax.fromage(1e-6),
+            # Scale updates by -1 since optax.apply_updates is additive and we want to descend on the loss.
+            optax.scale(-1.0) # Put a minus sign to *minimise* the loss.
+            )
+        ###################################################################
         # Initialize the optimizer state using the init function and params of the model:
         self.actor_optimizer_state = self.actor_optimizer.init(self.actor_params)
 
@@ -155,13 +177,35 @@ class TD3:
         self.critic = Critic()
         self.critic_params = self.critic.init(critic_rng_key, init_state, init_action)
         self.critic_target_params = self.critic.init(critic_rng_key, init_state, init_action) 
-        '''
-        self.critic_optimizer = optax.adamw(learning_rate=3e-4, weight_decay=0.01)
-        '''
+
+        # self.critic_optimizer = optax.adamw(learning_rate=3e-4, weight_decay=0.01)
+
+        # self.critic_optimizer = optax.chain(
+        #     optax.clip(1.0),
+        #     optax.adamw(learning_rate=schedule),
+        # )
+        ###################################################################
+        # Exponential decay of the learning rate.
+        start_learning_rate = 1e-3
+        end_learning_rate = 1e-5
+        scheduler = optax.exponential_decay(
+            init_value=start_learning_rate, 
+            transition_steps=1000,
+            decay_rate=0.99,
+            end_value=end_learning_rate
+            )
+        
+        # Combining gradient transforms using `optax.chain`.
         self.critic_optimizer = optax.chain(
-            optax.clip(1.0),
-            optax.fromage(learning_rate=schedule),
-        )
+            optax.clip_by_global_norm(1000.0),  # Clip by the gradient by the global norm.
+            # optax.scale_by_lion(),  # Use the updates from lion.
+            optax.scale_by_belief(),
+            optax.scale_by_schedule(scheduler),  # Use the learning rate from the scheduler.
+            # optax.fromage(1e-6),
+            # Scale updates by -1 since optax.apply_updates is additive and we want to descend on the loss.
+            optax.scale(-1.0) # Put a minus sign to *minimise* the loss.
+            )
+        ###################################################################
         # Initialize the optimizer state using the init function and params of the model:
         self.critic_optimizer_state = self.critic_optimizer.init(self.critic_params)
 
@@ -300,7 +344,7 @@ class TD3:
 
     def update_target_params(self, params, target_params):
         def _update(param, target_param):
-            return self.tau * param + (1 - self.tau) * target_param
+            return self.tau * param + (1. - self.tau) * target_param
         # updated_params = jax.tree_multimap(_update, params, target_params)
         updated_params = jax.tree_util.tree_map(_update, params, target_params)
         return updated_params
